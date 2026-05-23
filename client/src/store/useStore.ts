@@ -3,12 +3,17 @@ import type { SimulationConfig, TabId, ComparisonConfig, ModelConfig, HardwareCo
 import { GPU_SPECS, MODEL_PRESETS } from "../data/constants";
 import { calculatePerformanceMetrics, calculateCostEstimation, analyzeBottlenecks } from "../lib/simulation";
 
-interface StoreState {
+const STORAGE_KEY = "inference-lab-state-v1";
+
+interface PersistedState {
   config: SimulationConfig;
   activeTab: TabId;
   comparisons: ComparisonConfig[];
   learnMode: boolean;
   showArchitecture: boolean;
+}
+
+interface StoreState extends PersistedState {
   updateModel: (partial: Partial<ModelConfig>) => void;
   updateHardware: (partial: Partial<HardwareConfig>) => void;
   updateEngine: (partial: Partial<EngineConfig>) => void;
@@ -19,6 +24,7 @@ interface StoreState {
   loadPreset: (preset: Partial<SimulationConfig>) => void;
   toggleLearnMode: () => void;
   toggleArchitecture: () => void;
+  resetToDefaults: () => void;
 }
 
 const defaultModel: ModelConfig = {
@@ -63,25 +69,61 @@ const defaultEngine: EngineConfig = {
   streaming: true,
 };
 
-export const useStore = create<StoreState>((set, get) => ({
-  config: {
-    model: defaultModel,
-    hardware: defaultHardware,
-    engine: defaultEngine,
-    batchSize: 1,
-    inputTokens: 512,
-    outputTokens: 256,
-    concurrentUsers: 1,
-  },
+const defaultConfig: SimulationConfig = {
+  model: defaultModel,
+  hardware: defaultHardware,
+  engine: defaultEngine,
+  batchSize: 1,
+  inputTokens: 512,
+  outputTokens: 256,
+  concurrentUsers: 1,
+};
+
+const defaults: PersistedState = {
+  config: defaultConfig,
   activeTab: "model",
   comparisons: [],
   learnMode: true,
   showArchitecture: false,
+};
+
+function loadPersisted(): PersistedState | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedState>;
+    return {
+      config: parsed.config ? { ...defaultConfig, ...parsed.config } : defaultConfig,
+      activeTab: parsed.activeTab ?? "model",
+      comparisons: parsed.comparisons ?? [],
+      learnMode: parsed.learnMode ?? true,
+      showArchitecture: parsed.showArchitecture ?? false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pickPersisted(state: StoreState): PersistedState {
+  return {
+    config: state.config,
+    activeTab: state.activeTab,
+    comparisons: state.comparisons,
+    learnMode: state.learnMode,
+    showArchitecture: state.showArchitecture,
+  };
+}
+
+// Hydrate from localStorage
+const persisted = loadPersisted();
+const initialState: PersistedState = persisted ? { ...persisted } : { ...defaults };
+
+export const useStore = create<StoreState>((set, get) => ({
+  ...initialState,
 
   updateModel: (partial) =>
     set((state) => {
       const newModel = { ...state.config.model, ...partial };
-      // Auto-update related fields based on preset
       if (partial.name && MODEL_PRESETS[partial.name]) {
         const preset = MODEL_PRESETS[partial.name];
         Object.assign(newModel, {
@@ -102,7 +144,6 @@ export const useStore = create<StoreState>((set, get) => ({
   updateHardware: (partial) =>
     set((state) => {
       const newHardware = { ...state.config.hardware, ...partial };
-      // Auto-update GPU specs
       if (partial.gpuModel && GPU_SPECS[partial.gpuModel]) {
         const spec = GPU_SPECS[partial.gpuModel];
         newHardware.vramPerGpu = spec.vram;
@@ -111,7 +152,6 @@ export const useStore = create<StoreState>((set, get) => ({
         newHardware.powerConsumption = spec.power;
         newHardware.pcieGen = spec.pcieGen;
         newHardware.nvlink = spec.nvlink;
-        // Infer vendor
         if (["T4", "L4", "A10", "A100-40GB", "A100-80GB", "H100-80GB", "H200-141GB", "RTX-4090", "RTX-5090"].includes(partial.gpuModel)) {
           newHardware.vendor = "nvidia";
         } else if (partial.gpuModel === "MI300X") {
@@ -171,4 +211,14 @@ export const useStore = create<StoreState>((set, get) => ({
 
   toggleLearnMode: () => set((state) => ({ learnMode: !state.learnMode })),
   toggleArchitecture: () => set((state) => ({ showArchitecture: !state.showArchitecture })),
+  resetToDefaults: () => set(defaults),
 }));
+
+// Subscribe after create to persist all state changes to localStorage
+useStore.subscribe((state) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(pickPersisted(state)));
+  } catch {
+    // Ignore quota exceeded errors
+  }
+});
