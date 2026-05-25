@@ -1,6 +1,6 @@
 import http from "http";
 import dotenv from "dotenv";
-import { handleChat } from "./api/chat-handler.mjs";
+import { handleChat } from "./client/api/chat-handler.mjs";
 
 // Load .env file from project root for local dev
 dotenv.config();
