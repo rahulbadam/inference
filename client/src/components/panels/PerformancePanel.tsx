@@ -1,6 +1,4 @@
-import { useMemo } from "react";
 import { useStore } from "../../store/useStore";
-import { calculatePerformanceMetrics } from "../../lib/simulation";
 import InfoTip from "../InfoTip";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell
@@ -9,9 +7,14 @@ import { Timer, Gauge, Thermometer, Loader, Zap, Activity } from "lucide-react";
 
 const COLORS = ["#22d3ee", "#c084fc", "#34d399", "#fb923c", "#f87171", "#facc15", "#60a5fa"];
 
+// Seeded pseudo-random for consistent throughput simulation
+function seededRandom(seed: number) {
+  const x = Math.sin(seed * 9301 + 49297) * 233280;
+  return x - Math.floor(x);
+}
+
 export default function PerformancePanel() {
-  const config = useStore((s) => s.config);
-  const metrics = useMemo(() => calculatePerformanceMetrics(config), [config]);
+  const metrics = useStore((s) => s.metrics);
 
   const latencyData = [
     { name: "P50", value: metrics.latencyP50 },
@@ -29,9 +32,10 @@ export default function PerformancePanel() {
     { name: "Free", value: Math.max(0, metrics.memoryTotal - metrics.memoryUsed) },
   ];
 
+  // Use seeded random based on throughput for deterministic visual
   const throughputOverTime = Array.from({ length: 20 }, (_, i) => ({
     time: `${i * 5}s`,
-    throughput: metrics.throughput * (0.7 + Math.random() * 0.6),
+    throughput: Math.round(metrics.throughput * (0.7 + seededRandom(i + metrics.throughput) * 0.6)),
   }));
 
   const metricCards = [

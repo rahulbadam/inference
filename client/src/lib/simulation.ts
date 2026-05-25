@@ -7,32 +7,39 @@ import type {
   DeploymentRecommendation,
 } from "../types";
 import { PRECISION_INFO, GPU_SPECS, REGION_PRICING } from "../data/constants";
+import {
+  SIMULATION_CONSTANTS as C,
+  getEngineSpeedup,
+  SCHEDULING_SPEEDUP,
+  KV_CACHE_FACTORS,
+  DECODING_SPEEDUP,
+  getPipelineBubbleFactor,
+} from "./simulationConstants";
 
 export function calculatePerformanceMetrics(config: SimulationConfig): PerformanceMetrics {
   const { model, hardware, engine, batchSize, inputTokens, concurrentUsers } = config;
   const gpuSpec = GPU_SPECS[hardware.gpuModel];
   const precision = PRECISION_INFO[model.precision];
-  const bitsPerByte = 8;
-  const bytesPerParam = precision.bitsPerParam / bitsPerByte;
+  const bytesPerParam = precision.bitsPerParam / C.BITS_PER_BYTE;
 
   // Model weights size in GB
-  const modelWeightsGB = (model.parameters * 1e9 * bytesPerParam) / 1e9;
+  const modelWeightsGB = (model.parameters * C.BYTES_PER_GB * bytesPerParam) / C.BYTES_PER_GB;
 
   // MoE active parameters factor
-  const activeParamsFactor = model.type === "moe" ? 0.28 : 1.0; // ~28% active for typical MoE
+  const activeParamsFactor = model.type === "moe" ? C.MOE_ACTIVE_PARAMS_FACTOR : 1.0;
   const effectiveParams = model.parameters * activeParamsFactor;
 
   // KV Cache size
   const headDim = model.hiddenSize / model.attentionHeads;
   const kvCachePerTokenBytes =
     2 * model.layerCount * model.kvHeads * headDim * bytesPerParam;
-  const kvCacheGB = (kvCachePerTokenBytes * inputTokens * batchSize) / 1e9;
+  const kvCacheGB = (kvCachePerTokenBytes * inputTokens * batchSize) / C.BYTES_PER_GB;
 
   // Total memory
-  const activationsGB = (model.hiddenSize * model.layerCount * batchSize * bytesPerParam) / 1e9 * 0.5;
-  const cudaGraphsGB = 0.5;
-  const fragmentationGB = (modelWeightsGB + kvCacheGB + activationsGB) * 0.08;
-  const runtimeOverheadGB = 1.5;
+  const activationsGB = (model.hiddenSize * model.layerCount * batchSize * bytesPerParam) / C.BYTES_PER_GB * C.ACTIVATIONS_SCALE_FACTOR;
+  const cudaGraphsGB = C.CUDA_GRAPHS_OVERHEAD_GB;
+  const fragmentationGB = (modelWeightsGB + kvCacheGB + activationsGB) * C.FRAGMENTATION_PCT;
+  const runtimeOverheadGB = C.RUNTIME_OVERHEAD_GB;
   const totalMemoryGB =
     modelWeightsGB + kvCacheGB + activationsGB + cudaGraphsGB + fragmentationGB + runtimeOverheadGB;
 
@@ -40,89 +47,82 @@ export function calculatePerformanceMetrics(config: SimulationConfig): Performan
   const parallelismFactor = hardware.gpuCount > 1 && engine.servingMethod !== "single_gpu" ? hardware.gpuCount : 1;
   const memoryPerGPU = totalMemoryGB / parallelismFactor;
 
+  // Pipeline parallelism bubble overhead
+  const pipelineBubble = engine.servingMethod === "pipeline_parallel"
+    ? getPipelineBubbleFactor(hardware.gpuCount)
+    : 1.0;
+
   // Memory bandwidth bound tokens/sec
   const totalBandwidthGBs = gpuSpec.bandwidth * hardware.gpuCount;
   const bandwidthBoundTokSec =
-    (totalBandwidthGBs * 1e9) /
-    (effectiveParams * 1e9 * bytesPerParam * 2) *
+    (totalBandwidthGBs * C.BYTES_PER_GB) /
+    (effectiveParams * C.BYTES_PER_GB * bytesPerParam * 2) *
     (1 + precision.speedImprovementPct / 100);
 
   // Compute bound tokens/sec (prefill)
   const totalTFlops = gpuSpec.tensorCores
     ? gpuSpec.tflopsFp16 * hardware.gpuCount
-    : gpuSpec.tflopsFp16 * hardware.gpuCount * 0.7;
-  const prefillFlops = 2 * effectiveParams * 1e9 * inputTokens * batchSize;
-  const prefillTimeSec = prefillFlops / (totalTFlops * 1e12 * 0.75);
+    : gpuSpec.tflopsFp16 * hardware.gpuCount * C.NON_TC_COMPUTE_FACTOR;
+  const prefillFlops = 2 * effectiveParams * C.BYTES_PER_GB * inputTokens * batchSize;
+  const prefillTimeSec = prefillFlops / (totalTFlops * 1e12 * C.PREFILL_COMPUTE_UTILIZATION);
   const ttft = prefillTimeSec * 1000;
 
   // Decode tokens/sec (memory bound for autoregressive generation)
   const decodeTokSecSingle = Math.max(
-    bandwidthBoundTokSec * 0.85,
-    totalTFlops * 1e12 / (2 * effectiveParams * 1e9 * bytesPerParam) * 0.001
+    bandwidthBoundTokSec * C.DECODE_BANDWIDTH_EFFICIENCY,
+    totalTFlops * 1e12 / (2 * effectiveParams * C.BYTES_PER_GB * bytesPerParam) * 0.001
   );
 
-  // Engine optimizations
-  let engineSpeedup = 1.0;
-  if (engine.engine === "vLLM") engineSpeedup = 1.3;
-  else if (engine.engine === "TensorRT-LLM") engineSpeedup = 1.5;
-  else if (engine.engine === "llama.cpp") engineSpeedup = 0.9;
-  else if (engine.engine === "SGLang") engineSpeedup = 1.25;
-  else if (engine.engine === "TGI") engineSpeedup = 1.1;
-  else if (engine.engine === "Ollama") engineSpeedup = 0.85;
+  // Engine optimizations with batch-aware scaling
+  const engineSpeedup = getEngineSpeedup(engine.engine, batchSize);
 
   // Scheduling optimization
-  let schedulingSpeedup = 1.0;
-  if (engine.scheduling === "continuous_batching") schedulingSpeedup = 1.4;
-  else if (engine.scheduling === "dynamic_batching") schedulingSpeedup = 1.15;
+  const schedulingSpeedup = SCHEDULING_SPEEDUP[engine.scheduling] ?? 1.0;
 
   // KV cache strategy
-  let kvCacheSpeedup = 1.0;
-  let kvCacheMemoryReduction = 1.0;
-  if (engine.kvCacheStrategy === "paged_attention") {
-    kvCacheSpeedup = 1.2;
-    kvCacheMemoryReduction = 0.65;
-  } else if (engine.kvCacheStrategy === "offloading") {
-    kvCacheSpeedup = 0.6;
-    kvCacheMemoryReduction = 0.3;
-  } else if (engine.kvCacheStrategy === "prefix_caching") {
-    kvCacheSpeedup = 1.1;
-    kvCacheMemoryReduction = 0.8;
-  }
+  const kvFactors = KV_CACHE_FACTORS[engine.kvCacheStrategy] ?? { speedup: 1.0, memoryReduction: 1.0 };
 
   // Decoding strategy
-  let decodingSpeedup = 1.0;
-  if (engine.decoding === "speculative_decoding") decodingSpeedup = 2.2;
-  else if (engine.decoding === "beam_search") decodingSpeedup = 0.7;
+  const decodingSpeedup = DECODING_SPEEDUP[engine.decoding] ?? 1.0;
 
   const tokensPerSecond =
     decodeTokSecSingle *
     batchSize *
     engineSpeedup *
     schedulingSpeedup *
-    kvCacheSpeedup *
-    decodingSpeedup;
+    kvFactors.speedup *
+    decodingSpeedup *
+    pipelineBubble;
 
   // Latency percentiles
-  const baseLatencyMs = 1000 / tokensPerSecond;
+  const baseLatencyMs = 1000 / Math.max(tokensPerSecond, 0.001);
   const latencyP50 = baseLatencyMs;
-  const latencyP95 = baseLatencyMs * 1.8;
-  const latencyP99 = baseLatencyMs * 3.0;
+  const latencyP95 = baseLatencyMs * C.LATENCY_P95_MULTIPLIER;
+  const latencyP99 = baseLatencyMs * C.LATENCY_P99_MULTIPLIER;
 
   // GPU utilization
   const computeIntensity = effectiveParams / (gpuSpec.bandwidth / gpuSpec.tflopsFp16);
-  const gpuUtilization = Math.min(
-    95,
+  let gpuUtilization = Math.min(
+    C.GPU_UTIL_CEILING,
     Math.max(
-      15,
+      C.GPU_UTIL_FLOOR,
       45 +
-        computeIntensity * 20 +
-        batchSize * 1.5 +
-        (engine.scheduling === "continuous_batching" ? 20 : 0)
+        computeIntensity * C.GPU_UTIL_COMPUTE_COEFF +
+        batchSize * C.GPU_UTIL_BATCH_COEFF +
+        (engine.scheduling === "continuous_batching" ? C.CONTINUOUS_BATCHING_UTIL_BONUS : 0)
     )
   );
 
+  // Thermal throttling: if too hot, reduce utilization
+  const powerUsagePreThrottle = gpuSpec.power * hardware.gpuCount * (gpuUtilization / 100);
+  const thermalEstimate = C.THERMAL_BASELINE_C + (powerUsagePreThrottle / (hardware.gpuCount * 10));
+  
+  if (thermalEstimate > C.THERMAL_THROTTLE_THRESHOLD_C) {
+    gpuUtilization *= C.THERMAL_THROTTLE_DERATING;
+  }
+
   // Memory adjusted
-  const adjustedKvCacheGB = kvCacheGB * kvCacheMemoryReduction;
+  const adjustedKvCacheGB = kvCacheGB * kvFactors.memoryReduction;
   const adjustedTotalMemoryGB =
     modelWeightsGB / parallelismFactor +
     adjustedKvCacheGB +
@@ -133,23 +133,24 @@ export function calculatePerformanceMetrics(config: SimulationConfig): Performan
 
   // Max concurrency based on available memory
   const totalVRAM = hardware.vramPerGpu * hardware.gpuCount;
-  const concurrencyPerBatch = Math.floor(totalVRAM / memoryPerGPU);
+  const concurrencyPerBatch = Math.floor(totalVRAM / Math.max(memoryPerGPU, 0.001));
   const maxConcurrency = Math.max(1, concurrencyPerBatch * batchSize);
 
   // Throughput
   const throughput = tokensPerSecond * Math.min(concurrentUsers, maxConcurrency);
 
   // Batch efficiency
-  const batchEfficiency = Math.min(100, (batchSize / Math.max(1, maxConcurrency)) * 100 + 40);
+  const batchEfficiency = Math.min(100, (batchSize / Math.max(1, maxConcurrency)) * 100 + C.BATCH_EFFICIENCY_FLOOR_PCT);
 
-  // Power and thermal
+  // Power and thermal (post-throttling)
   const powerUsage = gpuSpec.power * hardware.gpuCount * (gpuUtilization / 100);
-  const thermalEstimate = 35 + (powerUsage / (hardware.gpuCount * 10));
+  const finalThermalEstimate = C.THERMAL_BASELINE_C + (powerUsage / (hardware.gpuCount * 10));
 
   // Load times
-  const modelLoadTime = (modelWeightsGB * 2) / (hardware.storageType === "nvme" ? 3.5 : hardware.storageType === "sata_ssd" ? 0.5 : 0.1);
-  const coldStartTime = modelLoadTime * 200 + ttft * 0.5;
-  const queueWaitTime = Math.max(0, (concurrentUsers - maxConcurrency) * latencyP50 * 0.1);
+  const storageSpeed = hardware.storageType === "nvme" ? C.NVME_READ_SPEED_GBPS : hardware.storageType === "sata_ssd" ? C.SATA_SSD_READ_SPEED_GBPS : C.DISTRIBUTED_READ_SPEED_GBPS;
+  const modelLoadTime = (modelWeightsGB * 2) / storageSpeed;
+  const coldStartTime = modelLoadTime * C.COLD_START_MULTIPLIER_MS_PER_SEC + ttft * 0.5;
+  const queueWaitTime = Math.max(0, (concurrentUsers - maxConcurrency) * latencyP50 * C.QUEUE_WAIT_FACTOR);
 
   return {
     ttft: Math.round(ttft),
@@ -165,7 +166,7 @@ export function calculatePerformanceMetrics(config: SimulationConfig): Performan
     throughput: Math.round(throughput),
     batchEfficiency: Math.round(batchEfficiency),
     powerUsage: Math.round(powerUsage),
-    thermalEstimate: Math.round(thermalEstimate),
+    thermalEstimate: Math.round(finalThermalEstimate),
     modelLoadTime: Math.round(modelLoadTime * 10) / 10,
     coldStartTime: Math.round(coldStartTime),
     queueWaitTime: Math.round(queueWaitTime),
@@ -184,7 +185,7 @@ export function calculateCostEstimation(config: SimulationConfig): CostEstimatio
 
   // Per-request estimation
   const metrics = calculatePerformanceMetrics(config);
-  const requestsPerHour = (3600 * 1000) / (metrics.latencyP50 + config.outputTokens * (1000 / metrics.tokensPerSecond));
+  const requestsPerHour = (3600 * 1000) / (metrics.latencyP50 + config.outputTokens * (1000 / Math.max(metrics.tokensPerSecond, 0.001)));
   const perRequestCost = (hourlyGpuCost + electricityCost / (24 * 30)) / Math.max(1, requestsPerHour);
   const perMillionTokenCost = perRequestCost * 1e6 / (config.inputTokens + config.outputTokens);
   const infrastructureOverhead = monthlyCost * (pricing.overheadMultiplier - 1);
@@ -204,15 +205,15 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
   const metrics = calculatePerformanceMetrics(config);
   const gpuSpec = GPU_SPECS[hardware.gpuModel];
   const precision = PRECISION_INFO[model.precision];
-  const bytesPerParam = precision.bitsPerParam / 8;
+  const bytesPerParam = precision.bitsPerParam / C.BITS_PER_BYTE;
   const bottlenecks: Bottleneck[] = [];
 
   const totalVRAM = hardware.vramPerGpu * hardware.gpuCount;
 
   // VRAM bottleneck
-  if (metrics.memoryUsed > totalVRAM * 0.95) {
+  if (metrics.memoryUsed > totalVRAM * C.VRAM_CRITICAL_THRESHOLD_PCT) {
     const weightSizeGB = (model.parameters * bytesPerParam);
-    const kvGB = (2 * model.layerCount * model.kvHeads * (model.hiddenSize / model.attentionHeads) * bytesPerParam * inputTokens * batchSize) / 1e9;
+    const kvGB = (2 * model.layerCount * model.kvHeads * (model.hiddenSize / model.attentionHeads) * bytesPerParam * inputTokens * batchSize) / C.BYTES_PER_GB;
     bottlenecks.push({
       type: "vram",
       severity: "critical",
@@ -221,8 +222,8 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
       rootCauses: [
         {
           parameter: "Model Size",
-          currentValue: `${model.parameters}B params × ${bytesPerParam * 8}-bit = ${weightSizeGB.toFixed(0)}GB`,
-          threshold: `< ${totalVRAM * 0.6}GB (leaving room for cache + overhead)`,
+          currentValue: `${model.parameters}B params × ${bytesPerParam * C.BITS_PER_BYTE}-bit = ${weightSizeGB.toFixed(0)}GB`,
+          threshold: `< ${totalVRAM * C.VRAM_SAFE_WEIGHTS_PCT}GB (leaving room for cache + overhead)`,
           impact: `Consumes ${((weightSizeGB / totalVRAM) * 100).toFixed(0)}% of total VRAM alone`,
         },
         {
@@ -239,7 +240,7 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
         },
       ],
     });
-  } else if (metrics.memoryUsed > totalVRAM * 0.8) {
+  } else if (metrics.memoryUsed > totalVRAM * C.VRAM_WARNING_THRESHOLD_PCT) {
     bottlenecks.push({
       type: "vram",
       severity: "warning",
@@ -249,22 +250,22 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
         {
           parameter: "VRAM Used / Total",
           currentValue: `${metrics.memoryUsed.toFixed(1)}GB / ${totalVRAM}GB (${((metrics.memoryUsed / totalVRAM) * 100).toFixed(0)}%)`,
-          threshold: "< 80% for stable operation",
+          threshold: `< 80% for stable operation`,
           impact: "Near-capacity leads to OOM crashes under load spikes",
         },
         {
           parameter: "Batch Size",
           currentValue: `${batchSize}`,
           threshold: `< ${Math.max(1, Math.floor(batchSize * 0.5))} to reduce KV cache`,
-          impact: `Each batch unit adds ${(metrics.kvCacheUsed / batchSize).toFixed(2)}GB KV cache`,
+          impact: `Each batch unit adds ${(metrics.kvCacheUsed / Math.max(batchSize, 1)).toFixed(2)}GB KV cache`,
         },
       ],
     });
   }
 
   // Memory bandwidth bottleneck
-  const memBoundThreshold = gpuSpec.bandwidth * 0.85;
-  const actualBandwidthNeeded = model.parameters * 1e9 * bytesPerParam * metrics.tokensPerSecond / 1e9;
+  const memBoundThreshold = gpuSpec.bandwidth * C.MEM_BW_SATURATION_PCT;
+  const actualBandwidthNeeded = model.parameters * C.BYTES_PER_GB * bytesPerParam * metrics.tokensPerSecond / C.BYTES_PER_GB;
   if (actualBandwidthNeeded > memBoundThreshold) {
     const idealTokSec = gpuSpec.bandwidth / (2 * model.parameters * bytesPerParam);
     bottlenecks.push({
@@ -281,7 +282,7 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
         },
         {
           parameter: "Precision",
-          currentValue: `${bytesPerParam * 8}-bit (${model.precision.toUpperCase()})`,
+          currentValue: `${bytesPerParam * C.BITS_PER_BYTE}-bit (${model.precision.toUpperCase()})`,
           threshold: "INT4 (4-bit) for 2× bandwidth relief",
           impact: `Doubling bandwidth by halving bytes per param`,
         },
@@ -297,8 +298,8 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
 
   // KV cache overflow
   const headDim = model.hiddenSize / model.attentionHeads;
-  const kvCachePerToken = (2 * model.layerCount * model.kvHeads * headDim * bytesPerParam) / 1e9;
-  const maxSeqLen = totalVRAM / (kvCachePerToken * batchSize);
+  const kvCachePerToken = (2 * model.layerCount * model.kvHeads * headDim * bytesPerParam) / C.BYTES_PER_GB;
+  const maxSeqLen = totalVRAM / (kvCachePerToken * Math.max(batchSize, 1));
   if (model.contextWindow > maxSeqLen) {
     bottlenecks.push({
       type: "kv_cache_overflow",
@@ -323,7 +324,7 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
   }
 
   // CPU bottleneck
-  if (hardware.cpuCores < hardware.gpuCount * 8) {
+  if (hardware.cpuCores < hardware.gpuCount * C.MIN_CPU_CORES_PER_GPU) {
     bottlenecks.push({
       type: "cpu",
       severity: "info",
@@ -332,14 +333,14 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
       rootCauses: [
         {
           parameter: "CPU Cores / GPU Ratio",
-          currentValue: `${(hardware.cpuCores / hardware.gpuCount).toFixed(1)} cores/GPU`,
-          threshold: "≥ 8 cores per GPU",
+          currentValue: `${(hardware.cpuCores / Math.max(hardware.gpuCount, 1)).toFixed(1)} cores/GPU`,
+          threshold: `≥ ${C.MIN_CPU_CORES_PER_GPU} cores per GPU`,
           impact: `Data preprocessing and batching are CPU-bound operations`,
         },
         {
           parameter: "Total CPU Cores",
           currentValue: `${hardware.cpuCores} cores`,
-          threshold: `≥ ${hardware.gpuCount * 8} cores for ${hardware.gpuCount} GPUs`,
+          threshold: `≥ ${hardware.gpuCount * C.MIN_CPU_CORES_PER_GPU} cores for ${hardware.gpuCount} GPUs`,
           impact: "Under-provisioned CPUs create queuing delays before GPU work",
         },
       ],
@@ -402,7 +403,7 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
   }
 
   // Compute bottleneck (if NOT memory bound and GPU util is low)
-  if (actualBandwidthNeeded < memBoundThreshold * 0.5 && metrics.gpuUtilization < 40) {
+  if (actualBandwidthNeeded < memBoundThreshold * C.COMPUTE_SPARE_BW_THRESHOLD_PCT && metrics.gpuUtilization < C.COMPUTE_UNDERUTIL_THRESHOLD) {
     bottlenecks.push({
       type: "compute",
       severity: "info",
@@ -425,28 +426,54 @@ export function analyzeBottlenecks(config: SimulationConfig): Bottleneck[] {
     });
   }
 
+  // Thermal throttling warning
+  if (metrics.thermalEstimate > C.THERMAL_THROTTLE_THRESHOLD_C) {
+    bottlenecks.push({
+      type: "compute",
+      severity: "warning",
+      message: `Thermal throttling detected — GPU at ${metrics.thermalEstimate}°C exceeds ${C.THERMAL_THROTTLE_THRESHOLD_C}°C threshold`,
+      suggestion: "Improve cooling (liquid cooling), reduce power limit, or decrease batch size.",
+      rootCauses: [
+        {
+          parameter: "GPU Temperature",
+          currentValue: `${metrics.thermalEstimate}°C`,
+          threshold: `< ${C.THERMAL_THROTTLE_THRESHOLD_C}°C`,
+          impact: `Clock speeds reduced by ${Math.round((1 - C.THERMAL_THROTTLE_DERATING) * 100)}%, hurting throughput`,
+        },
+        {
+          parameter: "Power Draw",
+          currentValue: `${metrics.powerUsage}W`,
+          threshold: `< ${Math.round(gpuSpec.power * hardware.gpuCount * 0.85)}W sustainable`,
+          impact: "Sustained high power generates excess heat",
+        },
+      ],
+    });
+  }
+
   return bottlenecks;
 }
 
 export function calculateMemoryBreakdown(config: SimulationConfig): MemoryBreakdown {
   const { model, hardware, engine, batchSize, inputTokens } = config;
   const precision = PRECISION_INFO[model.precision];
-  const bytesPerParam = precision.bitsPerParam / 8;
+  const bytesPerParam = precision.bitsPerParam / C.BITS_PER_BYTE;
   const parallelismFactor = hardware.gpuCount > 1 && engine.servingMethod !== "single_gpu" ? hardware.gpuCount : 1;
 
-  const modelWeights = (model.parameters * 1e9 * bytesPerParam) / 1e9 / parallelismFactor;
+  const modelWeights = (model.parameters * C.BYTES_PER_GB * bytesPerParam) / C.BYTES_PER_GB / parallelismFactor;
 
   const headDim = model.hiddenSize / model.attentionHeads;
-  const kvCachePerToken = (2 * model.layerCount * model.kvHeads * headDim * bytesPerParam) / 1e9;
+  const kvCachePerToken = (2 * model.layerCount * model.kvHeads * headDim * bytesPerParam) / C.BYTES_PER_GB;
   let kvCache = kvCachePerToken * inputTokens * batchSize;
 
-  if (engine.kvCacheStrategy === "paged_attention") kvCache *= 0.65;
-  else if (engine.kvCacheStrategy === "offloading") kvCache *= 0.3;
+  const kvFactors = KV_CACHE_FACTORS[engine.kvCacheStrategy];
+  if (kvFactors) {
+    kvCache *= kvFactors.memoryReduction;
+  }
 
-  const activations = (model.hiddenSize * model.layerCount * batchSize * bytesPerParam) / 1e9 * 0.5 / parallelismFactor;
-  const cudaGraphs = 0.5;
-  const fragmentation = (modelWeights + kvCache + activations) * 0.08;
-  const runtimeOverhead = 1.5;
+  const activations = (model.hiddenSize * model.layerCount * batchSize * bytesPerParam) / C.BYTES_PER_GB * C.ACTIVATIONS_SCALE_FACTOR / parallelismFactor;
+  const cudaGraphs = C.CUDA_GRAPHS_OVERHEAD_GB;
+  const fragmentation = (modelWeights + kvCache + activations) * C.FRAGMENTATION_PCT;
+  const runtimeOverhead = C.RUNTIME_OVERHEAD_GB;
 
   return {
     modelWeights: Math.round(modelWeights * 10) / 10,
@@ -465,7 +492,6 @@ export function getDeploymentRecommendation(
   avgOutputTokens: number,
   slaTargetMs: number
 ): DeploymentRecommendation {
-  // Simple heuristic recommendation
   const tokensPerDay = dailyRequests * (avgPromptSize + avgOutputTokens);
 
   let recommendedGpuSetup: string;

@@ -1,0 +1,12 @@
+{
+  "name": "inference-lab",
+  "private": true,
+  "scripts": {
+    "dev": "node dev-server.mjs & cd client && npm run dev",
+    "dev:api": "node dev-server.mjs",
+    "build": "cd client && npm run build"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

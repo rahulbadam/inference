@@ -1,11 +1,8 @@
-import { useMemo } from "react";
 import { useStore } from "../../store/useStore";
-import { analyzeBottlenecks } from "../../lib/simulation";
 import { AlertTriangle, AlertCircle, Info, CheckCircle2 } from "lucide-react";
 
 export default function BottleneckPanel() {
-  const config = useStore((s) => s.config);
-  const bottlenecks = useMemo(() => analyzeBottlenecks(config), [config]);
+  const bottlenecks = useStore((s) => s.bottlenecks);
 
   const severityIcon = {
     critical: <AlertTriangle size={18} className="text-accent-red" />,
@@ -105,6 +102,7 @@ export default function BottleneckPanel() {
             { type: "KV Cache Overflow", desc: "Context window exceeds cache capacity" },
             { type: "Network", desc: "Inter-node communication latency" },
             { type: "PCIe", desc: "GPU-to-GPU transfer bottleneck" },
+            { type: "Compute", desc: "Underutilized GPU compute or thermal throttling" },
           ].map((item) => (
             <div key={item.type} className="bg-surface-hover rounded-lg p-3">
               <div className="font-semibold text-text-primary mb-1">{item.type}</div>

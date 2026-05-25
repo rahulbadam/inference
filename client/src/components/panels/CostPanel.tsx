@@ -1,13 +1,11 @@
-import { useMemo } from "react";
 import { useStore } from "../../store/useStore";
-import { calculateCostEstimation } from "../../lib/simulation";
 import InfoTip from "../InfoTip";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { DollarSign, TrendingUp, Zap, Server } from "lucide-react";
 
 export default function CostPanel() {
-  const config = useStore((s) => s.config);
-  const costs = useMemo(() => calculateCostEstimation(config), [config]);
+  const costs = useStore((s) => s.costs);
+  const metrics = useStore((s) => s.metrics);
 
   const monthlyBreakdown = [
     { name: "GPU Rental", value: costs.monthlyCost - costs.infrastructureOverhead - costs.electricityCost },
@@ -96,6 +94,33 @@ export default function CostPanel() {
               <span className="text-accent-cyan font-mono">{item.value}</span>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* Cost vs Performance Tradeoff */}
+      <section className="glass-panel p-5">
+        <h3 className="text-sm font-medium text-text-secondary mb-3">Performance-Cost Efficiency</h3>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+          <div className="bg-surface-hover rounded-lg px-4 py-3 text-center">
+            <div className="text-xs text-text-muted">Tokens per Dollar</div>
+            <div className="text-xl font-bold text-accent-green mt-1">
+              {metrics.tokensPerSecond > 0 && costs.hourlyGpuCost > 0
+                ? Math.round((metrics.throughput * 3600) / (costs.hourlyGpuCost * 1000)).toLocaleString()
+                : "0"}k
+            </div>
+          </div>
+          <div className="bg-surface-hover rounded-lg px-4 py-3 text-center">
+            <div className="text-xs text-text-muted">GPU Util per $</div>
+            <div className="text-xl font-bold text-accent-cyan mt-1">
+              {costs.hourlyGpuCost > 0 ? (metrics.gpuUtilization / costs.hourlyGpuCost).toFixed(1) : "0"}%
+            </div>
+          </div>
+          <div className="bg-surface-hover rounded-lg px-4 py-3 text-center">
+            <div className="text-xs text-text-muted">Cost Efficiency</div>
+            <div className="text-xl font-bold text-accent-purple mt-1">
+              {metrics.batchEfficiency > 60 && metrics.gpuUtilization > 50 ? "Good" : "Poor"}
+            </div>
+          </div>
         </div>
       </section>
     </div>

@@ -1,7 +1,46 @@
+import { useState, useCallback, useEffect } from "react";
 import { useStore } from "../../store/useStore";
 import { MODEL_PRESETS, PRECISION_INFO } from "../../data/constants";
+import type { Precision } from "../../types";
 import InfoTip from "../InfoTip";
 import { BrainCircuit, Hash, Layers, Ruler, Binary, Type } from "lucide-react";
+
+function DebouncedRange({
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (val: number) => void;
+}) {
+  const [localValue, setLocalValue] = useState(value);
+
+  useEffect(() => {
+    setLocalValue(value);
+  }, [value]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => onChange(localValue), 100);
+    return () => clearTimeout(timer);
+  }, [localValue, onChange]);
+
+  return (
+    <input
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={localValue}
+      onChange={(e) => setLocalValue(parseFloat(e.target.value))}
+      className="w-full mt-3 accent-accent-cyan"
+    />
+  );
+}
 
 export default function ModelConfigPanel() {
   const config = useStore((s) => s.config);
@@ -12,6 +51,13 @@ export default function ModelConfigPanel() {
 
   const paramOptions = [1, 3, 7, 8, 13, 32, 70, 405];
   const contextOptions = [2048, 4096, 8192, 32768, 131072, 1048576];
+
+  const handleUpdateSimulation = useCallback(
+    (key: string, val: number) => {
+      useStore.getState().updateSimulation({ [key]: val });
+    },
+    []
+  );
 
   return (
     <div className="space-y-6">
@@ -71,15 +117,16 @@ export default function ModelConfigPanel() {
               </button>
             ))}
           </div>
-          <input
-            type="range"
-            min={0.5}
-            max={700}
-            step={0.1}
-            value={model.parameters}
-            onChange={(e) => updateModel({ parameters: parseFloat(e.target.value) })}
-            className="w-full mt-3 accent-accent-cyan"
-          />
+          <div className="flex items-center gap-3 mt-1">
+            <DebouncedRange
+              min={0.5}
+              max={700}
+              step={0.1}
+              value={model.parameters}
+              onChange={(v) => updateModel({ parameters: v })}
+            />
+            <span className="text-sm font-mono text-accent-cyan w-16 text-right">{model.parameters}B</span>
+          </div>
         </section>
 
         {/* Context Window */}
@@ -103,15 +150,18 @@ export default function ModelConfigPanel() {
               </button>
             ))}
           </div>
-          <input
-            type="range"
-            min={512}
-            max={2000000}
-            step={512}
-            value={model.contextWindow}
-            onChange={(e) => updateModel({ contextWindow: parseInt(e.target.value) })}
-            className="w-full mt-3 accent-accent-cyan"
-          />
+          <div className="flex items-center gap-3 mt-1">
+            <DebouncedRange
+              min={512}
+              max={2000000}
+              step={512}
+              value={model.contextWindow}
+              onChange={(v) => updateModel({ contextWindow: v })}
+            />
+            <span className="text-sm font-mono text-accent-cyan w-16 text-right">
+              {model.contextWindow >= 1000 ? `${(model.contextWindow / 1000).toFixed(0)}k` : model.contextWindow}
+            </span>
+          </div>
         </section>
 
         {/* Precision */}
@@ -124,7 +174,7 @@ export default function ModelConfigPanel() {
             {Object.entries(PRECISION_INFO).map(([key, info]) => (
               <button
                 key={key}
-                onClick={() => updateModel({ precision: key as any })}
+                onClick={() => updateModel({ precision: key as Precision })}
                 className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all text-left ${
                   model.precision === key
                     ? "bg-accent-cyan/15 text-accent-cyan border-accent-cyan/40"
@@ -225,14 +275,12 @@ export default function ModelConfigPanel() {
                 {param.tip ? <InfoTip term={param.tip}>{param.label}</InfoTip> : param.label}
               </label>
               <div className="flex items-center gap-3 mt-1">
-                <input
-                  type="range"
+                <DebouncedRange
                   min={param.min}
                   max={param.max}
                   step={param.key === "batchSize" ? 1 : 16}
                   value={param.value}
-                  onChange={(e) => useStore.getState().updateSimulation({ [param.key]: parseInt(e.target.value) })}
-                  className="flex-1 accent-accent-cyan"
+                  onChange={(v) => handleUpdateSimulation(param.key, v)}
                 />
                 <span className="text-sm font-mono text-accent-cyan w-16 text-right">{param.value}</span>
               </div>

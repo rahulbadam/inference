@@ -1,5 +1,5 @@
 import { useStore } from "../../store/useStore";
-import Tooltip from "../Tooltip";
+import InfoTip from "../InfoTip";
 import { Settings2, Zap, LayoutGrid, Database, GitBranch, Radio } from "lucide-react";
 
 const ENGINES = ["vLLM", "TensorRT-LLM", "Ollama", "llama.cpp", "TGI", "SGLang", "ONNX Runtime", "DeepSpeed"];
@@ -63,7 +63,7 @@ export default function EngineConfigPanel() {
         <section className="glass-panel p-5">
           <label className="block text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
             <LayoutGrid size={14} />
-            <Tooltip term="tensor-parallelism">Serving Method</Tooltip>
+            <InfoTip term="tensor-parallelism">Serving Method</InfoTip>
           </label>
           <div className="space-y-2">
             {SERVING_METHODS.map((method) => (
@@ -92,7 +92,7 @@ export default function EngineConfigPanel() {
         <section className="glass-panel p-5">
           <label className="block text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
             <Zap size={14} />
-            <Tooltip term="continuous-batching">Scheduling Strategy</Tooltip>
+            <InfoTip term="continuous-batching">Scheduling Strategy</InfoTip>
           </label>
           <div className="space-y-2">
             {SCHEDULING.map((sched) => (
@@ -120,7 +120,7 @@ export default function EngineConfigPanel() {
         <section className="glass-panel p-5">
           <label className="block text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
             <Database size={14} />
-            <Tooltip term="kv-cache">KV Cache Strategy</Tooltip>
+            <InfoTip term="kv-cache">KV Cache Strategy</InfoTip>
           </label>
           <div className="space-y-2">
             {KV_STRATEGIES.map((strategy) => (
@@ -148,7 +148,7 @@ export default function EngineConfigPanel() {
         <section className="glass-panel p-5">
           <label className="block text-sm font-medium text-text-secondary mb-3 flex items-center gap-2">
             <GitBranch size={14} />
-            <Tooltip term="speculative-decoding">Decoding Strategy</Tooltip>
+            <InfoTip term="speculative-decoding">Decoding Strategy</InfoTip>
           </label>
           <div className="space-y-2">
             {DECODING.map((dec) => (

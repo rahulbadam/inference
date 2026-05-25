@@ -10,6 +10,9 @@ import MemoryPanel from "./components/panels/MemoryPanel";
 import ComparisonPanel from "./components/panels/ComparisonPanel";
 import LearningPanel from "./components/panels/LearningPanel";
 import ArchitecturePanel from "./components/panels/ArchitecturePanel";
+import TokenSimulatorPanel from "./components/panels/TokenSimulatorPanel";
+import DeployPanel from "./components/panels/DeployPanel";
+import ChatWidget from "./components/ChatWidget";
 import PresetBar from "./components/PresetBar";
 import LiveMetricsBar from "./components/LiveMetricsBar";
 
@@ -25,6 +28,8 @@ function App() {
       case "cost": return <CostPanel />;
       case "bottleneck": return <BottleneckPanel />;
       case "memory": return <MemoryPanel />;
+      case "tokens": return <TokenSimulatorPanel />;
+      case "deploy": return <DeployPanel />;
       case "compare": return <ComparisonPanel />;
       case "learn": return <LearningPanel />;
       case "architecture": return <ArchitecturePanel />;
@@ -38,10 +43,11 @@ function App() {
       <div className="flex-1 flex flex-col min-w-0">
         <PresetBar />
         <LiveMetricsBar />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
           {renderPanel()}
         </main>
       </div>
+      <ChatWidget />
     </div>
   );
 }

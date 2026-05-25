@@ -1,12 +1,13 @@
-import { useMemo } from "react";
 import { useStore } from "../../store/useStore";
 import { calculateMemoryBreakdown } from "../../lib/simulation";
+import { useMemo } from "react";
 import InfoTip from "../InfoTip";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from "recharts";
 import { MemoryStick } from "lucide-react";
 
 export default function MemoryPanel() {
   const config = useStore((s) => s.config);
+  const metrics = useStore((s) => s.metrics);
   const breakdown = useMemo(() => calculateMemoryBreakdown(config), [config]);
 
   const data = [
@@ -21,6 +22,12 @@ export default function MemoryPanel() {
   const total = data.reduce((sum, d) => sum + d.value, 0);
   const tooltipStyle = { background: "#11121a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e6e7ee" };
 
+  const vramStatus = metrics.memoryUsed > metrics.memoryTotal * 0.95
+    ? { text: "Critical — OOM Risk", color: "text-accent-red" }
+    : metrics.memoryUsed > metrics.memoryTotal * 0.8
+    ? { text: "Warning — Near Capacity", color: "text-accent-orange" }
+    : { text: "Healthy", color: "text-accent-green" };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -28,7 +35,10 @@ export default function MemoryPanel() {
           <MemoryStick size={22} className="text-accent-cyan" />
           Memory Breakdown
         </h2>
-        <span className="text-sm text-text-muted">Total: <span className="text-accent-cyan font-mono font-bold">{total.toFixed(1)} GB</span></span>
+        <div className="flex items-center gap-3">
+          <span className={`text-xs font-medium ${vramStatus.color}`}>{vramStatus.text}</span>
+          <span className="text-sm text-text-muted">Total: <span className="text-accent-cyan font-mono font-bold">{total.toFixed(1)} GB</span></span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -79,6 +89,12 @@ export default function MemoryPanel() {
             <div className="flex justify-between text-sm mt-1">
               <span className="text-text-muted">Available VRAM</span>
               <span className="text-text-primary font-mono">{config.hardware.vramPerGpu * config.hardware.gpuCount} GB</span>
+            </div>
+            <div className="flex justify-between text-sm mt-1">
+              <span className="text-text-muted">Headroom</span>
+              <span className={`font-mono ${vramStatus.color}`}>
+                {Math.max(0, config.hardware.vramPerGpu * config.hardware.gpuCount - total).toFixed(1)} GB
+              </span>
             </div>
           </div>
         </section>

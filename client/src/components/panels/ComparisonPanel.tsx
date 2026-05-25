@@ -1,17 +1,49 @@
 import { useStore } from "../../store/useStore";
-import { Plus, Trash2, BarChart3 } from "lucide-react";
+import { Plus, Trash2, BarChart3, Download, Share2, AlertCircle } from "lucide-react";
 import { useState } from "react";
 
 export default function ComparisonPanel() {
   const comparisons = useStore((s) => s.comparisons);
   const addComparison = useStore((s) => s.addComparison);
   const removeComparison = useStore((s) => s.removeComparison);
+  const config = useStore((s) => s.config);
   const [name, setName] = useState("");
+  const [toast, setToast] = useState<string | null>(null);
 
   const handleAdd = () => {
     if (!name.trim()) return;
     addComparison(name.trim());
     setName("");
+    if (comparisons.length >= 3) {
+      setToast("Maximum 4 comparisons — oldest removed");
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
+
+  const exportJSON = () => {
+    const data = {
+      current: config,
+      comparisons,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "inference-lab-config.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    setToast("Config exported as JSON");
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const shareLink = () => {
+    const encoded = btoa(JSON.stringify(config));
+    const url = `${window.location.origin}${window.location.pathname}?config=${encoded}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setToast("Shareable link copied to clipboard");
+      setTimeout(() => setToast(null), 3000);
+    });
   };
 
   return (
@@ -21,7 +53,31 @@ export default function ComparisonPanel() {
           <BarChart3 size={22} className="text-accent-cyan" />
           Comparison Mode
         </h2>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={exportJSON}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-hover text-text-secondary border border-border text-xs font-medium hover:border-text-muted transition-all"
+          >
+            <Download size={14} />
+            Export
+          </button>
+          <button
+            onClick={shareLink}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-hover text-text-secondary border border-border text-xs font-medium hover:border-text-muted transition-all"
+          >
+            <Share2 size={14} />
+            Share
+          </button>
+        </div>
       </div>
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-accent-purple/90 text-white text-sm px-4 py-2 rounded-lg shadow-lg backdrop-blur flex items-center gap-2 animate-in slide-in-from-top-2">
+          <AlertCircle size={16} />
+          {toast}
+        </div>
+      )}
 
       {/* Add Comparison */}
       <section className="glass-panel p-5">

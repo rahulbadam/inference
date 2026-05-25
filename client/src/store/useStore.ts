@@ -14,6 +14,16 @@ interface PersistedState {
 }
 
 interface StoreState extends PersistedState {
+  // Memoized computed values
+  metrics: ReturnType<typeof calculatePerformanceMetrics>;
+  costs: ReturnType<typeof calculateCostEstimation>;
+  bottlenecks: ReturnType<typeof analyzeBottlenecks>;
+
+  // History for undo/redo
+  history: PersistedState[];
+  historyIndex: number;
+
+  // Actions
   updateModel: (partial: Partial<ModelConfig>) => void;
   updateHardware: (partial: Partial<HardwareConfig>) => void;
   updateEngine: (partial: Partial<EngineConfig>) => void;
@@ -25,6 +35,10 @@ interface StoreState extends PersistedState {
   toggleLearnMode: () => void;
   toggleArchitecture: () => void;
   resetToDefaults: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
 }
 
 const defaultModel: ModelConfig = {
@@ -104,6 +118,18 @@ function loadPersisted(): PersistedState | null {
   }
 }
 
+function loadSharedConfig(): SimulationConfig | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const encoded = params.get("config");
+    if (!encoded) return null;
+    const decoded = JSON.parse(atob(encoded)) as Partial<SimulationConfig>;
+    return { ...defaultConfig, ...decoded };
+  } catch {
+    return null;
+  }
+}
+
 function pickPersisted(state: StoreState): PersistedState {
   return {
     config: state.config,
@@ -114,12 +140,29 @@ function pickPersisted(state: StoreState): PersistedState {
   };
 }
 
-// Hydrate from localStorage
+function computeDerived(config: SimulationConfig) {
+  return {
+    metrics: calculatePerformanceMetrics(config),
+    costs: calculateCostEstimation(config),
+    bottlenecks: analyzeBottlenecks(config),
+  };
+}
+
+// Hydrate from localStorage or shared URL
+const sharedConfig = loadSharedConfig();
 const persisted = loadPersisted();
-const initialState: PersistedState = persisted ? { ...persisted } : { ...defaults };
+const initialPersisted: PersistedState = sharedConfig
+  ? { ...defaults, config: sharedConfig }
+  : persisted
+  ? { ...persisted }
+  : { ...defaults };
+const initialDerived = computeDerived(initialPersisted.config);
 
 export const useStore = create<StoreState>((set, get) => ({
-  ...initialState,
+  ...initialPersisted,
+  ...initialDerived,
+  history: [initialPersisted],
+  historyIndex: 0,
 
   updateModel: (partial) =>
     set((state) => {
@@ -138,7 +181,8 @@ export const useStore = create<StoreState>((set, get) => ({
           contextWindow: preset.defaultContext,
         });
       }
-      return { config: { ...state.config, model: newModel } };
+      const newConfig = { ...state.config, model: newModel };
+      return pushHistory(state, { config: newConfig, ...computeDerived(newConfig) });
     }),
 
   updateHardware: (partial) =>
@@ -160,33 +204,33 @@ export const useStore = create<StoreState>((set, get) => ({
           newHardware.vendor = "apple";
         }
       }
-      return { config: { ...state.config, hardware: newHardware } };
+      const newConfig = { ...state.config, hardware: newHardware };
+      return pushHistory(state, { config: newConfig, ...computeDerived(newConfig) });
     }),
 
   updateEngine: (partial) =>
-    set((state) => ({
-      config: { ...state.config, engine: { ...state.config.engine, ...partial } },
-    })),
+    set((state) => {
+      const newConfig = { ...state.config, engine: { ...state.config.engine, ...partial } };
+      return pushHistory(state, { config: newConfig, ...computeDerived(newConfig) });
+    }),
 
   updateSimulation: (partial) =>
-    set((state) => ({
-      config: { ...state.config, ...partial },
-    })),
+    set((state) => {
+      const newConfig = { ...state.config, ...partial };
+      return pushHistory(state, { config: newConfig, ...computeDerived(newConfig) });
+    }),
 
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   addComparison: (name) => {
     const state = get();
-    const metrics = calculatePerformanceMetrics(state.config);
-    const costs = calculateCostEstimation(state.config);
-    const bottlenecks = analyzeBottlenecks(state.config);
     const newComparison: ComparisonConfig = {
       id: crypto.randomUUID(),
       name,
       config: JSON.parse(JSON.stringify(state.config)),
-      metrics,
-      costs,
-      bottlenecks,
+      metrics: state.metrics,
+      costs: state.costs,
+      bottlenecks: state.bottlenecks,
     };
     set((s) => ({ comparisons: [...s.comparisons.slice(-3), newComparison] }));
   },
@@ -197,8 +241,8 @@ export const useStore = create<StoreState>((set, get) => ({
     })),
 
   loadPreset: (preset) =>
-    set((state) => ({
-      config: {
+    set((state) => {
+      const newConfig = {
         model: { ...state.config.model, ...preset.model },
         hardware: { ...state.config.hardware, ...preset.hardware },
         engine: { ...state.config.engine, ...preset.engine },
@@ -206,13 +250,65 @@ export const useStore = create<StoreState>((set, get) => ({
         inputTokens: preset.inputTokens ?? state.config.inputTokens,
         outputTokens: preset.outputTokens ?? state.config.outputTokens,
         concurrentUsers: preset.concurrentUsers ?? state.config.concurrentUsers,
-      },
-    })),
+      };
+      return pushHistory(state, { config: newConfig, ...computeDerived(newConfig) });
+    }),
 
   toggleLearnMode: () => set((state) => ({ learnMode: !state.learnMode })),
   toggleArchitecture: () => set((state) => ({ showArchitecture: !state.showArchitecture })),
-  resetToDefaults: () => set(defaults),
+  resetToDefaults: () => set(pushHistory(get(), { ...defaults, ...computeDerived(defaults.config) })),
+
+  undo: () =>
+    set((state) => {
+      if (state.historyIndex <= 0) return state;
+      const newIndex = state.historyIndex - 1;
+      const prev = state.history[newIndex];
+      return {
+        ...prev,
+        ...computeDerived(prev.config),
+        history: state.history,
+        historyIndex: newIndex,
+      };
+    }),
+
+  redo: () =>
+    set((state) => {
+      if (state.historyIndex >= state.history.length - 1) return state;
+      const newIndex = state.historyIndex + 1;
+      const next = state.history[newIndex];
+      return {
+        ...next,
+        ...computeDerived(next.config),
+        history: state.history,
+        historyIndex: newIndex,
+      };
+    }),
+
+  canUndo: () => get().historyIndex > 0,
+  canRedo: () => get().historyIndex < get().history.length - 1,
 }));
+
+function pushHistory(state: StoreState, update: Partial<StoreState>): Partial<StoreState> {
+  // Don't push if config is identical to current
+  const currentConfigStr = JSON.stringify(state.config);
+  const newConfigStr = JSON.stringify(update.config);
+  if (currentConfigStr === newConfigStr) return update;
+
+  const newHistory = state.history.slice(0, state.historyIndex + 1);
+  const persistedSlice = pickPersisted({ ...state, ...update } as StoreState);
+  newHistory.push(persistedSlice);
+
+  // Limit history to 50 entries
+  if (newHistory.length > 50) {
+    newHistory.shift();
+  }
+
+  return {
+    ...update,
+    history: newHistory,
+    historyIndex: newHistory.length - 1,
+  };
+}
 
 // Subscribe after create to persist all state changes to localStorage
 useStore.subscribe((state) => {

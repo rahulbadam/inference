@@ -156,7 +156,6 @@ export type TabId =
   | "bottleneck"
   | "memory"
   | "tokens"
-  | "gpu"
   | "deploy"
   | "compare"
   | "learn"
