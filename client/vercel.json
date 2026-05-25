@@ -4,5 +4,8 @@
       "source": "/((?!api/).*)",
       "destination": "/"
     }
-  ]
+  ],
+  "env": {
+    "HF_API_KEY": "@hf_api_key"
+  }
 }
